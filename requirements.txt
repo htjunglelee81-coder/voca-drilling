@@ -1,4 +1,4 @@
 streamlit
 pandas
-deep-translator
 gTTS
+python-docx
