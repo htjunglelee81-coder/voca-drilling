@@ -1,132 +1,111 @@
 import streamlit as st
 from docx import Document
 import re
-import json
-import os
-from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Voca Master Pro", layout="wide")
+st.set_page_config(page_title="Voca Simple Table", layout="wide")
 
-# --- DB 로직 ---
-DB_FILE = "voca_db.json"
-def load_db():
-    if os.path.exists(DB_FILE):
-        try:
-            with open(DB_FILE, "r", encoding="utf-8") as f: return json.load(f)
-        except: return {}
-    return {}
-
-def save_db(db):
-    with open(DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(db, f, ensure_ascii=False, indent=4)
-
-if 'vdb' not in st.session_state: st.session_state.vdb = load_db()
-if 'view' not in st.session_state: st.session_state.view = "list"
-if 'drill_word' not in st.session_state: st.session_state.drill_word = None
-
-# --- [인지적 파서] 단어와 다음 단어 사이를 모두 긁어옴 ---
-def parse_docx_logic(file):
+# --- 1. 워드 파일 파싱 엔진 (가장 중요) ---
+def parse_voca_file(file):
     doc = Document(file)
     data = []
-    current_item = None
+    current_entry = None
 
     for para in doc.paragraphs:
         text = para.text.strip()
         if not text: continue
 
-        # 1. 단어 판별 (영문 위주, 짧음)
-        if re.match(r'^[a-zA-Z\s\-]+$', text) and len(text.split()) <= 3:
-            if current_item: data.append(current_item)
-            current_item = {"word": text, "meaning": "", "sentences": [], "solved": False}
+        # 규칙 A: 'Korean:'이 포함된 줄은 현재 단어의 '뜻'
+        if "Korean:" in text:
+            if current_entry:
+                current_entry["meaning"] = text.replace("Korean:", "").strip()
         
-        # 2. 뜻 판별
-        elif "Korean:" in text:
-            if current_item:
-                current_item["meaning"] = text.replace("Korean:", "").strip()
+        # 규칙 B: 숫자로 시작하는 줄은 현재 단어의 '예문'
+        elif re.match(r'^\d+[\.\)]', text):
+            if current_entry:
+                current_entry["sentences"].append(text)
         
-        # 3. 나머지는 무조건 현재 단어의 예문으로 간주 (숫자 여부 상관없음)
-        else:
-            if current_item:
-                clean_s = re.sub(r'^\d+[\.\)]', '', text).strip()
-                current_item["sentences"].append(clean_s)
+        # 규칙 C: 영문자로만 시작하고 짧은 줄은 '새 단어' (가장 우선순위 낮음)
+        elif re.match(r'^[a-zA-Z\s\-]+$', text) and len(text.split()) <= 4:
+            if current_entry:
+                data.append(current_entry)
+            current_entry = {"word": text, "meaning": "뜻 없음", "sentences": []}
+        
+        # 규칙 D: 그 외 숫자로 시작하지 않지만 긴 문장들도 예문으로 간주 (advocacy 대응)
+        elif len(text.split()) > 4 and current_entry:
+            if not text.startswith("Korean:"):
+                current_entry["sentences"].append(text)
 
-    if current_item: data.append(current_item)
+    if current_entry: data.append(current_entry)
     return data
 
-# --- 사이드바 ---
-with st.sidebar:
-    st.title("📂 Manager")
-    if st.button("➕ 새 프로젝트"):
-        st.session_state.view = "create"; st.rerun()
+# --- 2. 앱 UI 시작 ---
+st.title("📄 단어장 테이블 생성기")
+
+uploaded_file = st.file_uploader("워드 파일을 업로드하세요 (.docx)", type="docx")
+
+if uploaded_file:
+    # 데이터 추출
+    if 'voca_list' not in st.session_state:
+        st.session_state.voca_list = parse_voca_file(uploaded_file)
+    
+    voca_list = st.session_state.voca_list
+
+    # 상단 컨트롤러
+    c1, c2 = st.columns(2)
+    hide_word = c1.checkbox("영어 어휘 숨기기")
+    hide_meaning = c2.checkbox("한국어 의미 숨기기")
+
     st.write("---")
-    for p_name in list(st.session_state.vdb.keys()):
-        c1, c2 = st.columns([4, 1])
-        if c1.button(f"📖 {p_name}", key=f"p_{p_name}"):
-            st.session_state.selected_p = p_name
-            st.session_state.view = "study"
-            st.session_state.drill_word = None
-            st.rerun()
-        if c2.button("🗑️", key=f"d_{p_name}"):
-            del st.session_state.vdb[p_name]
-            save_db(st.session_state.vdb); st.rerun()
 
-# --- 화면 로직 ---
-if st.session_state.view == "list":
-    st.title("학습 목록")
-    if not st.session_state.vdb: st.info("새 프로젝트를 생성하세요.")
-    else:
-        for p in st.session_state.vdb.keys():
-            if st.button(f"'{p}' 입장"):
-                st.session_state.selected_p = p; st.session_state.view = "study"; st.rerun()
+    # 테이블 헤더
+    h1, h2, h3 = st.columns([2, 3, 2])
+    h1.subheader("영단어")
+    h2.subheader("의미")
+    h3.subheader("예문")
 
-elif st.session_state.view == "create":
-    st.title("🛠 프로젝트 생성")
-    tab1, tab2 = st.tabs(["파일 업로드", "직접 입력"])
-    with st.form("c_form"):
-        p_name = st.text_input("이름")
-        dist = st.selectbox("배분", ["총 일수", "하루 개수"])
-        val = st.number_input("값", min_value=1, value=5)
-        up = st.file_uploader("Word", type=['docx']) if tab1 else None
-        if st.form_submit_button("생성"):
-            raw = parse_docx_logic(up) if up else []
-            if p_name and raw:
-                days = val if dist == "총 일수" else (len(raw)//val + 1)
-                chunk = (len(raw)//days) + 1
-                p_db = {}
-                for i in range(int(days)):
-                    d_key = (datetime.now() + timedelta(days=i)).strftime("%Y-%m-%d")
-                    p_db[d_key] = raw[i*chunk : (i+1)*chunk]
-                st.session_state.vdb[p_name] = p_db
-                save_db(st.session_state.vdb); st.session_state.view = "list"; st.rerun()
+    # 테이블 본문
+    for idx, item in enumerate(voca_list):
+        row = st.container()
+        with row:
+            col1, col2, col3 = st.columns([2, 3, 2])
+            
+            # 영단어 열
+            if hide_word:
+                ans_w = col1.text_input("단어 입력", key=f"w_{idx}", label_visibility="collapsed")
+                if ans_w.lower() == item['word'].lower():
+                    col1.success(f"정답: {item['word']}")
+            else:
+                col1.write(f"### {item['word']}")
 
-elif st.session_state.view == "study":
-    p_name = st.session_state.selected_p
-    day_voca = st.session_state.vdb[p_name][st.selectbox("날짜", list(st.session_state.vdb[p_name].keys()))]
-    
-    h_w, h_m = st.checkbox("단어 가리기"), st.checkbox("뜻 가리기")
-    
-    for v in day_voca:
-        r = st.columns([2, 3, 2, 1])
-        # 단어 가리기 로직
-        if h_w:
-            if r[0].text_input("w", key=f"w_{v['word']}", label_visibility="collapsed").lower() == v['word'].lower():
-                r[0].success(v['word'])
-        else: r[0].write(v['word'])
-        
-        # 뜻 가리기 로직 (정답일 때만 출력)
-        if h_m:
-            u_m = r[1].text_input("m", key=f"m_{v['word']}", label_visibility="collapsed")
-            if u_m and u_m in v['meaning']: r[1].success(v['meaning'])
-        else: r[1].write(v['meaning'])
-        
-        if r[2].button(f"📝 문장({len(v['sentences'])})", key=f"b_{v['word']}"):
-            st.session_state.drill_word = v['word']
-        
-        if st.session_state.drill_word == v['word']:
-            st.info(f"🔍 {v['word']} 연습")
-            for si, sent in enumerate(v['sentences']):
-                masked = re.compile(re.escape(v['word']), re.IGNORECASE).sub("____", sent)
-                st.write(f"{si+1}. {masked}")
-                if st.text_input("답", key=f"a_{v['word']}_{si}", label_visibility="collapsed").lower() == v['word'].lower():
-                    st.success("OK")
-            if st.button("닫기"): st.session_state.drill_word = None; st.rerun()
+            # 의미 열
+            if hide_meaning:
+                ans_m = col2.text_input("뜻 입력", key=f"m_{idx}", label_visibility="collapsed")
+                # 입력이 있을 때만 정답 확인
+                if ans_m and (ans_m in item['meaning']):
+                    col2.info(f"정답: {item['meaning']}")
+            else:
+                col2.write(item['meaning'])
+
+            # 예문 보기 버튼
+            if col3.button(f"📖 예문 보기 ({len(item['sentences'])})", key=f"btn_{idx}"):
+                if f"show_{idx}" not in st.session_state:
+                    st.session_state[f"show_{idx}"] = True
+                else:
+                    st.session_state[f"show_{idx}"] = not st.session_state[f"show_{idx}"]
+
+            # 예문 리스트 출력 (클릭 시 하단에 펼쳐짐)
+            if st.session_state.get(f"show_{idx}", False):
+                st.markdown("---")
+                st.write(f"🔍 **{item['word']}** 의 예문 리스트")
+                for s_idx, sent in enumerate(item['sentences']):
+                    # 단어 부분 빈칸 처리
+                    masked_sent = re.compile(re.escape(item['word']), re.IGNORECASE).sub("________", sent)
+                    sc1, sc2 = st.columns([5, 1])
+                    sc1.write(f"{s_idx+1}. {masked_sent}")
+                    ans_s = sc2.text_input("입력", key=f"ans_{idx}_{s_idx}", label_visibility="collapsed")
+                    if ans_s.lower() == item['word'].lower():
+                        sc2.success("OK")
+                st.markdown("---")
+
+else:
+    st.warning("워드 파일을 업로드하면 테이블이 생성됩니다.")
